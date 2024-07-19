@@ -1,6 +1,10 @@
 [package]
 name = "fastlz-rs"
-version = "0.0.0"
+repository = "https://github.com/ArcaneNibble/fastlz-rs"
+categories = ["no-std::no-alloc", "compression"]
+keywords = ["lz77", "fastlz"]
+license = "0BSD"
+version = "0.0.1"
 edition = "2021"
 
 [dependencies]
