@@ -75,9 +75,7 @@ impl<'a> OutputSink<DecompressError> for BufOutput<'a> {
 #[cfg(feature = "alloc")]
 impl OutputSink<DecompressError> for VecOutput {
     fn put_lits(&mut self, lits: &[u8]) -> Result<(), DecompressError> {
-        let pos = self.vec.len();
-        self.vec.resize(pos + lits.len(), 0);
-        self.vec[pos..pos + lits.len()].copy_from_slice(lits);
+        self.vec.extend_from_slice(lits);
         Ok(())
     }
 
