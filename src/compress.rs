@@ -84,9 +84,24 @@ impl<O: OutputHelper> OutputSink<CompressError> for L1Output<O> {
         Ok(())
     }
 
-    fn put_backref(&mut self, disp: usize, len: usize) -> Result<(), CompressError> {
+    fn put_backref(&mut self, disp: usize, mut len: usize) -> Result<(), CompressError> {
         debug_assert!(disp <= 8191);
-        debug_assert!((3..=264).contains(&len));
+        debug_assert!(len >= 3);
+
+        // the length is too long for a single backref,
+        // so we can break it up into multiple (with the same displacement)
+        // *but* we need to keep a len >= 3 for the last one
+        // we can either do extra checking, or take a slight compression ratio hit
+        // with simpler code that breaks the backref into smaller-than-max chunks
+        while len > 0xff + 9 {
+            let b0 = 0b111_00000 | ((disp >> 8) as u8);
+            let b1 = 0xff - 2;
+            let b2 = disp as u8;
+            self.0.putc(b0)?;
+            self.0.putc(b1)?;
+            self.0.putc(b2)?;
+            len -= 0xff - 2 + 9;
+        }
 
         if len <= 8 {
             // 2 bytes opcode
@@ -299,10 +314,47 @@ mod tests {
         }
 
         {
+            let mut out = [0u8; 3];
+            let mut outbuf: L1Output<BufOutput> = L1Output((&mut out[..]).into());
+            outbuf.put_backref(1, 264).unwrap();
+            assert_eq!(outbuf.0.buf, [0xe0, 0xff, 0x01]);
+        }
+
+        {
             let mut out = [0u8; 1];
             let mut outbuf: L1Output<BufOutput> = L1Output((&mut out[..]).into());
             outbuf.put_backref(1, 9).expect_err("");
             assert_eq!(outbuf.0.buf, [0xe0]);
+        }
+    }
+
+    #[test]
+    fn test_lv1_encoding_verylong() {
+        {
+            // exactly overflows len 3 into next
+            let mut out = [0u8; 5];
+            let mut outbuf: L1Output<BufOutput> = L1Output((&mut out[..]).into());
+            outbuf.put_backref(1, 265).unwrap();
+            assert_eq!(outbuf.0.buf, [0xe0, 0xfd, 0x01, 0x20, 0x01]);
+        }
+
+        {
+            // exactly overflows len 264 (max) into next
+            let mut out = [0u8; 6];
+            let mut outbuf: L1Output<BufOutput> = L1Output((&mut out[..]).into());
+            outbuf.put_backref(1, 526).unwrap();
+            assert_eq!(outbuf.0.buf, [0xe0, 0xfd, 0x01, 0xe0, 0xff, 0x01]);
+        }
+
+        {
+            // overflows twice
+            let mut out = [0u8; 8];
+            let mut outbuf: L1Output<BufOutput> = L1Output((&mut out[..]).into());
+            outbuf.put_backref(1, 527).unwrap();
+            assert_eq!(
+                outbuf.0.buf,
+                [0xe0, 0xfd, 0x01, 0xe0, 0xfd, 0x01, 0x20, 0x01]
+            );
         }
     }
 
