@@ -2,3 +2,4 @@
 testtool/testtool
 testtool/FastLZ
 .vscode/settings.json
+Cargo.lock
