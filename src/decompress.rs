@@ -8,12 +8,19 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+/// Compression errors
 #[derive(Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DecompressError {
+    /// The input was truncated
     InputTruncated,
+    /// The input contains an invalid backreference
     InvalidBackreference,
+    /// The input contains an compression level indicator
     InvalidCompressionLevel,
+    /// The output buffer was too small to hold all the output.
+    ///
+    /// The output that has been written *is* valid, but has been truncated.
     OutputTooSmall,
 }
 impl fmt::Display for DecompressError {
@@ -212,6 +219,9 @@ fn decompress_impl(
     }
 }
 
+/// Decompress the input into a preallocated buffer
+///
+/// Returns the actual decompressed size on success, or an error otherwise
 pub fn decompress_to_buf(inp: &[u8], outp: &mut [u8]) -> Result<usize, DecompressError> {
     let mut outp: BufOutput = outp.into();
     decompress_impl(inp, &mut outp)?;
@@ -219,6 +229,11 @@ pub fn decompress_to_buf(inp: &[u8], outp: &mut [u8]) -> Result<usize, Decompres
 }
 
 #[cfg(feature = "alloc")]
+/// Decompress the input into a [Vec](alloc::vec::Vec)
+///
+/// Returns the result on success, or an error otherwise
+///
+/// If `capacity_hint` is provided, it will be passed to [Vec::with_capacity](alloc::vec::Vec::with_capacity)
 pub fn decompress_to_vec(
     inp: &[u8],
     capacity_hint: Option<usize>,

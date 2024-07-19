@@ -12,9 +12,13 @@ extern crate std;
 const HTAB_LOG2: usize = 13;
 const HTAB_SZ: usize = 1 << HTAB_LOG2;
 
+/// Compression errors
 #[derive(Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CompressError {
+    /// The output buffer was too small to hold all the output.
+    ///
+    /// The output that has been written *is* valid, but has been truncated.
     OutputTooSmall,
 }
 impl fmt::Display for CompressError {
@@ -211,10 +215,14 @@ impl<O: OutputHelper> CompressSink for L2Output<O> {
     }
 }
 
+/// Compression level
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompressionLevel {
+    /// Default compression (i.e. level 1 if the input is less than 64 KiB, level 2 otherwise)
     Default,
+    /// Level 1
     Level1,
+    /// Level 2
     Level2,
 }
 impl Default for CompressionLevel {
@@ -243,14 +251,21 @@ impl InputHelper for &[u8] {
     }
 }
 
+/// Holds state for performing compression operations
+///
+/// This is only needed just in case stack overflows occur because the object is too big
 pub struct CompressState {
     htab: [usize; HTAB_SZ],
 }
 impl CompressState {
+    /// Allocate a new compression state
     pub fn new() -> Self {
         Self { htab: [0; HTAB_SZ] }
     }
     #[cfg(feature = "alloc")]
+    /// Allocate a new compression state specifically on the heap
+    ///
+    /// This is a workaround for non-guaranteed copy elision / RVO.
     pub fn new_boxed() -> alloc::boxed::Box<Self> {
         // *sigh* things that aren't stable, workaround, bleh
         use core::ptr::addr_of_mut;
@@ -362,7 +377,9 @@ impl CompressState {
         Ok(())
     }
 
-    #[allow(private_bounds)]
+    /// Compress the input into a preallocated buffer
+    ///
+    /// Returns the compressed size on success, or an error otherwise
     pub fn compress_to_buf(
         &mut self,
         inp: &[u8],
@@ -389,7 +406,9 @@ impl CompressState {
     }
 
     #[cfg(feature = "alloc")]
-    #[allow(private_bounds)]
+    /// Decompress the input into a [Vec](alloc::vec::Vec)
+    ///
+    /// Returns the result on success, or an error otherwise
     pub fn compress_to_vec(
         &mut self,
         inp: &[u8],
