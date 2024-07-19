@@ -186,8 +186,47 @@ fn decompress_lv1(mut inp: &[u8], outp: &mut impl OutputSink) -> Result<(), Deco
     }
 }
 
-fn decompress_lv2(inp: &[u8], outp: &mut impl OutputSink) -> Result<(), DecompressError> {
-    todo!()
+fn decompress_lv2(mut inp: &[u8], outp: &mut impl OutputSink) -> Result<(), DecompressError> {
+    // special for first control byte
+    let mut ctrl = inp.getc().unwrap() & 0b000_11111;
+    loop {
+        if ctrl >> 5 == 0b000 {
+            // literal run
+            let len = (ctrl & 0b000_11111) as usize + 1;
+            inp.check_len(len)?;
+            outp.put_lits(&inp[..len])?;
+            inp = &inp[len..];
+        } else {
+            // backreference
+            let mut disp = ((ctrl & 0b000_11111) as usize) << 8;
+
+            let mut len = (ctrl >> 5) as usize + 2;
+            if ctrl >> 5 == 0b111 {
+                // long match
+                loop {
+                    let morelen = inp.getc()?;
+                    len += morelen as usize;
+                    if morelen != 0xff {
+                        break;
+                    }
+                }
+            }
+
+            disp |= inp.getc()? as usize;
+            if disp == 0b11111_11111111 {
+                let moredisp = ((inp.getc()? as usize) << 8) | (inp.getc()? as usize);
+                disp += moredisp;
+            }
+
+            outp.put_backref(disp, len)?;
+        }
+
+        if let Ok(c) = inp.getc() {
+            ctrl = c;
+        } else {
+            return Ok(());
+        }
+    }
 }
 
 fn decompress_impl(inp: &[u8], outp: &mut impl OutputSink) -> Result<(), DecompressError> {
@@ -340,9 +379,89 @@ mod tests {
 
         let d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let inp_fn = d.join("src/decompress.rs");
-        let ref_fn = d.join("temp.out");
+        let ref_fn = d.join("temp-lv1-comp.out");
         std::process::Command::new(d.join("./testtool/testtool"))
             .arg("c")
+            .arg(inp_fn.to_str().unwrap())
+            .arg(ref_fn.to_str().unwrap())
+            .status()
+            .unwrap();
+
+        let inp = std::fs::read(inp_fn).unwrap();
+        let ref_ = std::fs::read(&ref_fn).unwrap();
+        let _ = std::fs::remove_file(ref_fn);
+
+        let out = decompress_to_vec(&ref_, None).unwrap();
+        assert_eq!(inp, out);
+    }
+
+    #[test]
+    fn test_lv2_manual_short_match() {
+        let mut out = [0u8; 5];
+        let len = decompress_to_buf(&[0x21, b'A', b'B', 0x20, 0x01], &mut out).unwrap();
+        assert_eq!(len, 5);
+        assert_eq!(out, [b'A', b'B', b'A', b'B', b'A']);
+    }
+
+    #[test]
+    fn test_lv2_manual_long_match() {
+        let mut out = [0u8; 11];
+        let len = decompress_to_buf(&[0x21, b'A', b'B', 0xe0, 0x00, 0x01], &mut out).unwrap();
+        assert_eq!(len, 11);
+        assert_eq!(
+            out,
+            [b'A', b'B', b'A', b'B', b'A', b'B', b'A', b'B', b'A', b'B', b'A']
+        );
+    }
+
+    #[test]
+    fn test_lv2_manual_verylong_match() {
+        let mut out = [0u8; 266];
+        let len = decompress_to_buf(&[0x21, b'A', b'B', 0xe0, 0xff, 0x00, 0x01], &mut out).unwrap();
+        assert_eq!(len, 266);
+        for i in 0..(266 / 2) {
+            assert_eq!(out[i * 2], b'A');
+            assert_eq!(out[i * 2 + 1], b'B');
+        }
+    }
+
+    #[test]
+    fn test_lv2_manual_verylong_disp() {
+        let mut out = [0u8; 0x2004];
+        let len = decompress_to_buf(
+            &[
+                0x21, b'A', 0x00, 0xE0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x15, 0x00, 0x3F, 0xFF, 0x00, 0x00,
+                0x00, b'Z',
+            ],
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(len, 0x2004);
+        for i in 0..0x2004 {
+            if i == 0 {
+                assert_eq!(out[i], b'A');
+            } else if i == 0x2000 {
+                assert_eq!(out[i], b'A');
+            } else if i == 0x2003 {
+                assert_eq!(out[i], b'Z');
+            } else {
+                assert_eq!(out[i], 0);
+            }
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_lv2_against_ref() {
+        extern crate std;
+
+        let d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let inp_fn = d.join("src/decompress.rs");
+        let ref_fn = d.join("temp-lv2-comp.out");
+        std::process::Command::new(d.join("./testtool/testtool"))
+            .arg("C")
             .arg(inp_fn.to_str().unwrap())
             .arg(ref_fn.to_str().unwrap())
             .status()
