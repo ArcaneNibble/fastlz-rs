@@ -1,4 +1,5 @@
 use core::fmt;
+use core::mem;
 
 use crate::util::*;
 
@@ -29,6 +30,7 @@ impl std::error::Error for CompressError {}
 trait OutputHelper {
     fn putc(&mut self, c: u8) -> Result<(), CompressError>;
     fn put_buf(&mut self, buf: &[u8]) -> Result<(), CompressError>;
+    fn poke_l2(&mut self);
 }
 impl<'a> OutputHelper for BufOutput<'a> {
     fn putc(&mut self, c: u8) -> Result<(), CompressError> {
@@ -57,6 +59,10 @@ impl<'a> OutputHelper for BufOutput<'a> {
             Ok(())
         }
     }
+
+    fn poke_l2(&mut self) {
+        self.buf[0] |= 0b001_00000;
+    }
 }
 
 #[cfg(feature = "alloc")]
@@ -69,19 +75,28 @@ impl OutputHelper for VecOutput {
         self.vec.extend_from_slice(buf);
         Ok(())
     }
+
+    fn poke_l2(&mut self) {
+        self.vec[0] |= 0b001_00000;
+    }
 }
 
 struct L1Output<O>(O);
 struct L2Output<O>(O);
 
 impl<O: OutputHelper> OutputSink<CompressError> for L1Output<O> {
-    fn put_lits(&mut self, lits: &[u8]) -> Result<(), CompressError> {
-        let len = lits.len();
-        debug_assert!(len >= 1);
-        debug_assert!(len <= 32);
+    fn put_lits(&mut self, mut lits: &[u8]) -> Result<(), CompressError> {
+        while lits.len() > 32 {
+            self.0.putc(31)?;
+            self.0.put_buf(&lits[..32])?;
+            lits = &lits[32..];
+        }
+
+        debug_assert!(lits.len() >= 1);
+        debug_assert!(lits.len() <= 32);
 
         // 1 byte opcode, len bytes literals
-        self.0.putc((len - 1) as u8)?;
+        self.0.putc((lits.len() - 1) as u8)?;
         self.0.put_buf(lits)?;
 
         Ok(())
@@ -127,13 +142,18 @@ impl<O: OutputHelper> OutputSink<CompressError> for L1Output<O> {
 }
 
 impl<O: OutputHelper> OutputSink<CompressError> for L2Output<O> {
-    fn put_lits(&mut self, lits: &[u8]) -> Result<(), CompressError> {
-        let len = lits.len();
-        debug_assert!(len >= 1);
-        debug_assert!(len <= 32);
+    fn put_lits(&mut self, mut lits: &[u8]) -> Result<(), CompressError> {
+        while lits.len() > 32 {
+            self.0.putc(31)?;
+            self.0.put_buf(&lits[..32])?;
+            lits = &lits[32..];
+        }
+
+        debug_assert!(lits.len() >= 1);
+        debug_assert!(lits.len() <= 32);
 
         // 1 byte opcode, len bytes literals
-        self.0.putc((len - 1) as u8)?;
+        self.0.putc((lits.len() - 1) as u8)?;
         self.0.put_buf(lits)?;
 
         Ok(())
@@ -173,6 +193,24 @@ impl<O: OutputHelper> OutputSink<CompressError> for L2Output<O> {
     }
 }
 
+trait CompressSink {
+    const MAX_DISP: usize;
+    const IS_LEVEL2: bool;
+    fn poke_l2(&mut self);
+}
+impl<O: OutputHelper> CompressSink for L1Output<O> {
+    const MAX_DISP: usize = 8191;
+    const IS_LEVEL2: bool = false;
+    fn poke_l2(&mut self) {}
+}
+impl<O: OutputHelper> CompressSink for L2Output<O> {
+    const MAX_DISP: usize = 8191 + 65535;
+    const IS_LEVEL2: bool = true;
+    fn poke_l2(&mut self) {
+        self.0.poke_l2();
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompressionLevel {
     Default,
@@ -189,6 +227,20 @@ fn fastlz_hash(v: u32) -> usize {
     let h = v.wrapping_mul(2654435769);
     let h = h >> (32 - HTAB_LOG2);
     h as usize
+}
+
+trait InputHelper {
+    fn inc(&mut self, n: usize);
+    fn peek4(&mut self) -> Option<u32>;
+}
+impl InputHelper for &[u8] {
+    fn inc(&mut self, n: usize) {
+        *self = &self[n..];
+    }
+    fn peek4(&mut self) -> Option<u32> {
+        let ret = u32::from_le_bytes(*self.first_chunk::<4>()?);
+        Some(ret)
+    }
 }
 
 pub struct CompressState {
@@ -211,12 +263,103 @@ impl CompressState {
         }
     }
 
-    fn compress_impl(
+    fn compress_impl<L: OutputSink<CompressError> + CompressSink>(
         &mut self,
-        inp: &[u8],
-        outp: &mut impl OutputSink<CompressError>,
+        mut inp: &[u8],
+        outp: &mut L,
     ) -> Result<(), CompressError> {
-        todo!()
+        if inp.len() == 0 {
+            return Ok(());
+        }
+
+        self.htab.fill(0);
+
+        let orig_inp = inp;
+        let mut lits_start_anchor_pos = 0;
+
+        // we need to output at least 1 literal
+        // (unclear why C code skips 2?)
+        inp.inc(1);
+
+        while let Some(hash_head) = inp.peek4() {
+            let hash = fastlz_hash(hash_head & 0xffffff);
+            let cur_pos = inp.as_ptr() as usize - orig_inp.as_ptr() as usize;
+            let ref_pos = mem::replace(&mut self.htab[hash], cur_pos);
+            let ref_ = &orig_inp[ref_pos..];
+            debug_assert!(cur_pos > ref_pos);
+            let disp = cur_pos - ref_pos - 1;
+
+            if disp <= L::MAX_DISP && inp[..3] == ref_[..3] {
+                // we have a match of at least three bytes
+
+                if L::IS_LEVEL2 {
+                    if disp >= 8191 {
+                        // if this is a far-away match, we want at least 5 bytes to make it worthwhile
+                        if inp.len() < 5 {
+                            break;
+                        }
+                        if inp[3..5] != ref_[3..5] {
+                            inp.inc(1);
+                            continue;
+                        }
+                    }
+                }
+
+                // compute the full match length
+                let mut len = 3 + inp[3..]
+                    .iter()
+                    .zip(ref_[3..].iter())
+                    .map_while(|(a, b)| if a == b { Some(1) } else { None })
+                    .fold(0, |a, x| a + x);
+
+                if L::IS_LEVEL2 {
+                    // for some reason, level2 doesn't allow *ending* a file on a far-away match
+                    if disp >= 8191 {
+                        if len == inp.len() {
+                            len -= 1;
+                        }
+                    }
+                }
+
+                // any accumulated lits?
+                let lits = &orig_inp[lits_start_anchor_pos..cur_pos];
+                if lits.len() > 0 {
+                    outp.put_lits(lits)?;
+                }
+
+                // now we can finally put in the match
+                outp.put_backref(disp, len)?;
+                lits_start_anchor_pos = cur_pos + len;
+
+                // update hashes at the boundary
+                inp.inc(len - 2);
+                if let Some(hash_head) = inp.peek4() {
+                    let hash = fastlz_hash(hash_head & 0xffffff);
+                    let cur_pos = inp.as_ptr() as usize - orig_inp.as_ptr() as usize;
+                    self.htab[hash] = cur_pos;
+
+                    let hash = fastlz_hash((hash_head >> 8) & 0xffffff);
+                    self.htab[hash] = cur_pos + 1;
+
+                    inp.inc(2);
+                } else {
+                    break;
+                }
+            } else {
+                // no match
+                inp.inc(1);
+            }
+        }
+
+        // if there's anything leftover, output it
+        let lits = &orig_inp[lits_start_anchor_pos..];
+        if lits.len() > 0 {
+            outp.put_lits(lits)?;
+        }
+
+        outp.poke_l2();
+
+        Ok(())
     }
 
     #[allow(private_bounds)]
@@ -464,5 +607,173 @@ mod tests {
         assert_eq!(fastlz_hash(0xaa), 538);
         assert_eq!(fastlz_hash(0xbb), 4688);
         assert_eq!(fastlz_hash(0xff), 4904);
+    }
+
+    #[test]
+    fn test_short_and_uncompressible() {
+        {
+            let mut state = CompressState::new();
+            let mut out = [0u8; 3];
+            let len = state
+                .compress_to_buf(&[1, 2], &mut out, CompressionLevel::Level1)
+                .unwrap();
+            assert_eq!(len, out.len());
+            assert_eq!(out, [0x01, 1, 2]);
+        }
+
+        {
+            let mut state = CompressState::new();
+            let mut out = [0u8; 6];
+            let len = state
+                .compress_to_buf(&[1, 2, 3, 4, 5], &mut out, CompressionLevel::Level1)
+                .unwrap();
+            assert_eq!(len, out.len());
+            assert_eq!(out, [0x04, 1, 2, 3, 4, 5]);
+        }
+    }
+
+    #[test]
+    fn test_simple_backref() {
+        {
+            let mut state = CompressState::new();
+            let mut out = [0u8; 4];
+            let len = state
+                .compress_to_buf(&[1, 1, 1, 1, 1], &mut out, CompressionLevel::Level1)
+                .unwrap();
+            assert_eq!(len, out.len());
+            assert_eq!(out, [0x00, 1, 0x40, 0x00]);
+        }
+        {
+            // test trailing nonmatch
+            let mut state = CompressState::new();
+            let mut out = [0u8; 6];
+            let len = state
+                .compress_to_buf(&[1, 1, 1, 1, 1, 2], &mut out, CompressionLevel::Level1)
+                .unwrap();
+            assert_eq!(len, out.len());
+            assert_eq!(out, [0x00, 1, 0x40, 0x00, 0x00, 2]);
+        }
+        {
+            // test longer match, ending at end
+            let mut state = CompressState::new();
+            let mut out = [0u8; 6];
+            let len = state
+                .compress_to_buf(
+                    &[1, 2, 3, 1, 2, 3, 1, 2, 3],
+                    &mut out,
+                    CompressionLevel::Level1,
+                )
+                .unwrap();
+            assert_eq!(len, out.len());
+            assert_eq!(out, [0x02, 1, 2, 3, 0x80, 0x02]);
+        }
+        {
+            // test longer match, not ending at end
+            let mut state = CompressState::new();
+            let mut out = [0u8; 8];
+            let len = state
+                .compress_to_buf(
+                    &[1, 2, 3, 1, 2, 3, 1, 2, 3, 4],
+                    &mut out,
+                    CompressionLevel::Level1,
+                )
+                .unwrap();
+            assert_eq!(len, out.len());
+            assert_eq!(out, [0x02, 1, 2, 3, 0x80, 0x02, 0x00, 4]);
+        }
+    }
+
+    #[test]
+    fn test_rehash_at_boundary() {
+        {
+            let mut state = CompressState::new();
+            let mut out = [0u8; 8];
+            let len = state
+                .compress_to_buf(
+                    &[1, 2, 3, 1, 2, 3, 1, 2, 3, 2, 3, 2, 3],
+                    &mut out,
+                    CompressionLevel::Level1,
+                )
+                .unwrap();
+            assert_eq!(len, out.len());
+            assert_eq!(out, [0x02, 1, 2, 3, 0x80, 0x02, 0x40, 0x01]);
+        }
+        {
+            let mut state = CompressState::new();
+            let mut out = [0u8; 8];
+            let len = state
+                .compress_to_buf(
+                    &[1, 2, 3, 1, 2, 3, 1, 2, 3, 3, 3, 3, 3],
+                    &mut out,
+                    CompressionLevel::Level1,
+                )
+                .unwrap();
+            assert_eq!(len, out.len());
+            assert_eq!(out, [0x02, 1, 2, 3, 0x80, 0x02, 0x40, 0x00]);
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_lv1_against_ref() {
+        extern crate std;
+
+        let d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let inp_fn = d.join("src/compress.rs");
+        let comp_fn = d.join("temp-lv1-mycomp.lz");
+        let check_fn = d.join("temp-lv1-mycomp.out");
+
+        let inp = std::fs::read(inp_fn).unwrap();
+        let mut comp_state = CompressState::new();
+        let out = comp_state
+            .compress_to_vec(&inp, CompressionLevel::Level1)
+            .unwrap();
+        std::fs::write(&comp_fn, out).unwrap();
+
+        std::process::Command::new(d.join("./testtool/testtool"))
+            .arg("d")
+            .arg(comp_fn.to_str().unwrap())
+            .arg(check_fn.to_str().unwrap())
+            .status()
+            .unwrap();
+
+        let check = std::fs::read(&check_fn).unwrap();
+
+        let _ = std::fs::remove_file(&comp_fn);
+        let _ = std::fs::remove_file(&check_fn);
+
+        assert_eq!(inp, check);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_lv2_against_ref() {
+        extern crate std;
+
+        let d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let inp_fn = d.join("src/compress.rs");
+        let comp_fn = d.join("temp-lv2-mycomp.lz");
+        let check_fn = d.join("temp-lv2-mycomp.out");
+
+        let inp = std::fs::read(inp_fn).unwrap();
+        let mut comp_state = CompressState::new();
+        let out = comp_state
+            .compress_to_vec(&inp, CompressionLevel::Level2)
+            .unwrap();
+        std::fs::write(&comp_fn, out).unwrap();
+
+        std::process::Command::new(d.join("./testtool/testtool"))
+            .arg("d")
+            .arg(comp_fn.to_str().unwrap())
+            .arg(check_fn.to_str().unwrap())
+            .status()
+            .unwrap();
+
+        let check = std::fs::read(&check_fn).unwrap();
+
+        let _ = std::fs::remove_file(&comp_fn);
+        let _ = std::fs::remove_file(&check_fn);
+
+        assert_eq!(inp, check);
     }
 }
