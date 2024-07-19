@@ -1,4 +1,6 @@
-use core::fmt::{self};
+use core::fmt;
+
+use crate::util::*;
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -14,7 +16,6 @@ pub enum DecompressError {
     InvalidCompressionLevel,
     OutputTooSmall,
 }
-
 impl fmt::Display for DecompressError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -25,37 +26,10 @@ impl fmt::Display for DecompressError {
         }
     }
 }
-
 #[cfg(feature = "std")]
 impl std::error::Error for DecompressError {}
 
-/// Internal abstraction for the two different types of outputs
-///
-/// Note for both functions: we guarantee writing all the way up to the limit
-trait OutputSink {
-    /// Add the given literal run to the output
-    ///
-    /// If this would overflow the output, return Err(DecompressError::OutputTooSmall).
-    fn put_lits(&mut self, lits: &[u8]) -> Result<(), DecompressError>;
-    /// Add a backreference to the output
-    ///
-    /// A `disp` of 0 means the current position minus 1.
-    /// Increasing `disp` means further backwards
-    ///
-    /// Copy `len` bytes, which as usual for LZ77 may exceed `disp`.
-    fn put_backref(&mut self, disp: usize, len: usize) -> Result<(), DecompressError>;
-}
-
-struct BufOutput<'a> {
-    pos: usize,
-    buf: &'a mut [u8],
-}
-impl<'a> From<&'a mut [u8]> for BufOutput<'a> {
-    fn from(buf: &'a mut [u8]) -> Self {
-        Self { pos: 0, buf }
-    }
-}
-impl<'a> OutputSink for BufOutput<'a> {
+impl<'a> OutputSink<DecompressError> for BufOutput<'a> {
     fn put_lits(&mut self, lits: &[u8]) -> Result<(), DecompressError> {
         let mut len = lits.len();
         let mut did_overflow = false;
@@ -99,17 +73,7 @@ impl<'a> OutputSink for BufOutput<'a> {
 }
 
 #[cfg(feature = "alloc")]
-struct VecOutput {
-    vec: alloc::vec::Vec<u8>,
-}
-#[cfg(feature = "alloc")]
-impl From<alloc::vec::Vec<u8>> for VecOutput {
-    fn from(vec: alloc::vec::Vec<u8>) -> Self {
-        Self { vec }
-    }
-}
-#[cfg(feature = "alloc")]
-impl OutputSink for VecOutput {
+impl OutputSink<DecompressError> for VecOutput {
     fn put_lits(&mut self, lits: &[u8]) -> Result<(), DecompressError> {
         let pos = self.vec.len();
         self.vec.resize(pos + lits.len(), 0);
@@ -155,7 +119,10 @@ impl InputHelper for &[u8] {
     }
 }
 
-fn decompress_lv1(mut inp: &[u8], outp: &mut impl OutputSink) -> Result<(), DecompressError> {
+fn decompress_lv1(
+    mut inp: &[u8],
+    outp: &mut impl OutputSink<DecompressError>,
+) -> Result<(), DecompressError> {
     // special for first control byte
     let mut ctrl = inp.getc().unwrap() & 0b000_11111;
     loop {
@@ -186,7 +153,10 @@ fn decompress_lv1(mut inp: &[u8], outp: &mut impl OutputSink) -> Result<(), Deco
     }
 }
 
-fn decompress_lv2(mut inp: &[u8], outp: &mut impl OutputSink) -> Result<(), DecompressError> {
+fn decompress_lv2(
+    mut inp: &[u8],
+    outp: &mut impl OutputSink<DecompressError>,
+) -> Result<(), DecompressError> {
     // special for first control byte
     let mut ctrl = inp.getc().unwrap() & 0b000_11111;
     loop {
@@ -229,7 +199,10 @@ fn decompress_lv2(mut inp: &[u8], outp: &mut impl OutputSink) -> Result<(), Deco
     }
 }
 
-fn decompress_impl(inp: &[u8], outp: &mut impl OutputSink) -> Result<(), DecompressError> {
+fn decompress_impl(
+    inp: &[u8],
+    outp: &mut impl OutputSink<DecompressError>,
+) -> Result<(), DecompressError> {
     if inp.len() == 0 {
         return Ok(());
     }
