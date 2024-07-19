@@ -31,6 +31,7 @@ impl fmt::Display for CompressError {
 #[cfg(feature = "std")]
 impl std::error::Error for CompressError {}
 
+/// This is the actual abstraction over outputting to a slice vs a Vec
 trait OutputHelper {
     fn putc(&mut self, c: u8) -> Result<(), CompressError>;
     fn put_buf(&mut self, buf: &[u8]) -> Result<(), CompressError>;
@@ -85,7 +86,9 @@ impl OutputHelper for VecOutput {
     }
 }
 
+/// Level 1 output sink, to force code monomorphization
 struct L1Output<O>(O);
+/// Level 2 output sink, to force code monomorphization
 struct L2Output<O>(O);
 
 impl<O: OutputHelper> OutputSink<CompressError> for L1Output<O> {
@@ -197,6 +200,7 @@ impl<O: OutputHelper> OutputSink<CompressError> for L2Output<O> {
     }
 }
 
+/// Additional parameters that need to be monomorphized into level 1 vs level 2 output
 trait CompressSink {
     const MAX_DISP: usize;
     const IS_LEVEL2: bool;

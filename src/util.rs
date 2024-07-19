@@ -18,6 +18,7 @@ pub trait OutputSink<ErrTy> {
     fn put_backref(&mut self, disp: usize, len: usize) -> Result<(), ErrTy>;
 }
 
+/// Borrowed slice of bytes
 pub struct BufOutput<'a> {
     pub pos: usize,
     pub buf: &'a mut [u8],
@@ -28,6 +29,7 @@ impl<'a> From<&'a mut [u8]> for BufOutput<'a> {
     }
 }
 
+/// Owned Vec of bytes
 #[cfg(feature = "alloc")]
 pub struct VecOutput {
     pub vec: alloc::vec::Vec<u8>,
