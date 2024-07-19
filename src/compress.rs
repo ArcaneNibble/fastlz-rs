@@ -8,6 +8,9 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+const HTAB_LOG2: usize = 13;
+const HTAB_SZ: usize = 1 << HTAB_LOG2;
+
 #[derive(Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CompressError {
@@ -182,18 +185,28 @@ impl Default for CompressionLevel {
     }
 }
 
+fn fastlz_hash(v: u32) -> usize {
+    let h = v.wrapping_mul(2654435769);
+    let h = h >> (32 - HTAB_LOG2);
+    h as usize
+}
+
 pub struct CompressState {
-    // nothing yet
+    htab: [usize; HTAB_SZ],
 }
 impl CompressState {
     pub fn new() -> Self {
-        Self {}
+        Self { htab: [0; HTAB_SZ] }
     }
     #[cfg(feature = "alloc")]
     pub fn new_boxed() -> alloc::boxed::Box<Self> {
         // *sigh* things that aren't stable, workaround, bleh
+        use core::ptr::addr_of_mut;
         unsafe {
             let self_ = alloc::alloc::alloc(core::alloc::Layout::new::<Self>()) as *mut Self;
+            for i in 0..HTAB_SZ {
+                addr_of_mut!((*self_).htab[i]).write(0);
+            }
             alloc::boxed::Box::from_raw(self_)
         }
     }
@@ -440,5 +453,16 @@ mod tests {
             outbuf.put_backref(8192, 9 + 0xff + 1).unwrap();
             assert_eq!(outbuf.0.buf, [0xff, 0xff, 0x01, 0xff, 0x00, 0x01]);
         }
+    }
+
+    #[test]
+    fn test_ref_hashes() {
+        assert_eq!(fastlz_hash(1), 5062);
+        assert_eq!(fastlz_hash(2), 1933);
+        assert_eq!(fastlz_hash(3), 6996);
+        assert_eq!(fastlz_hash(4), 3867);
+        assert_eq!(fastlz_hash(0xaa), 538);
+        assert_eq!(fastlz_hash(0xbb), 4688);
+        assert_eq!(fastlz_hash(0xff), 4904);
     }
 }
