@@ -11,6 +11,7 @@ extern crate std;
 pub enum DecompressError {
     InputTruncated,
     InvalidBackreference,
+    InvalidCompressionLevel,
     OutputTooSmall,
 }
 
@@ -19,6 +20,7 @@ impl fmt::Display for DecompressError {
         match self {
             DecompressError::InputTruncated => write!(f, "input was truncated"),
             DecompressError::InvalidBackreference => write!(f, "invalid backreference"),
+            DecompressError::InvalidCompressionLevel => write!(f, "invalid compression level"),
             DecompressError::OutputTooSmall => write!(f, "output buffer was insufficient"),
         }
     }
@@ -33,8 +35,8 @@ impl std::error::Error for DecompressError {}
 trait OutputSink {
     /// Add the given literal run to the output
     ///
-    /// If this would overflow the output, return Err.
-    fn put_lits(&mut self, lits: &[u8]) -> Result<(), ()>;
+    /// If this would overflow the output, return Err(DecompressError::OutputTooSmall).
+    fn put_lits(&mut self, lits: &[u8]) -> Result<(), DecompressError>;
     /// Add a backreference to the output
     ///
     /// A `disp` of 0 means the current position minus 1.
@@ -54,7 +56,7 @@ impl<'a> From<&'a mut [u8]> for BufOutput<'a> {
     }
 }
 impl<'a> OutputSink for BufOutput<'a> {
-    fn put_lits(&mut self, lits: &[u8]) -> Result<(), ()> {
+    fn put_lits(&mut self, lits: &[u8]) -> Result<(), DecompressError> {
         let mut len = lits.len();
         let mut did_overflow = false;
         if self.pos + len > self.buf.len() {
@@ -66,7 +68,7 @@ impl<'a> OutputSink for BufOutput<'a> {
         self.pos += len;
 
         if did_overflow {
-            Err(())
+            Err(DecompressError::OutputTooSmall)
         } else {
             Ok(())
         }
@@ -108,7 +110,7 @@ impl From<alloc::vec::Vec<u8>> for VecOutput {
 }
 #[cfg(feature = "alloc")]
 impl OutputSink for VecOutput {
-    fn put_lits(&mut self, lits: &[u8]) -> Result<(), ()> {
+    fn put_lits(&mut self, lits: &[u8]) -> Result<(), DecompressError> {
         let pos = self.vec.len();
         self.vec.resize(pos + lits.len(), 0);
         self.vec[pos..pos + lits.len()].copy_from_slice(lits);
@@ -130,8 +132,74 @@ impl OutputSink for VecOutput {
     }
 }
 
-fn decompress_impl(inp: &[u8], outp: &mut impl OutputSink) -> Result<(), DecompressError> {
+trait InputHelper {
+    fn getc(&mut self) -> Result<u8, DecompressError>;
+    fn check_len(&mut self, min: usize) -> Result<(), DecompressError>;
+}
+impl InputHelper for &[u8] {
+    fn getc(&mut self) -> Result<u8, DecompressError> {
+        if self.len() == 0 {
+            return Err(DecompressError::InputTruncated);
+        }
+        let c = self[0];
+        *self = &self[1..];
+        Ok(c)
+    }
+
+    fn check_len(&mut self, min: usize) -> Result<(), DecompressError> {
+        if self.len() < min {
+            Err(DecompressError::InputTruncated)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn decompress_lv1(mut inp: &[u8], outp: &mut impl OutputSink) -> Result<(), DecompressError> {
+    // special for first control byte
+    let mut ctrl = inp.getc().unwrap() & 0b000_11111;
+    loop {
+        if ctrl >> 5 == 0b000 {
+            // literal run
+            let len = (ctrl & 0b000_11111) as usize + 1;
+            inp.check_len(len)?;
+            outp.put_lits(&inp[..len])?;
+            inp = &inp[len..];
+        } else {
+            // backreference
+            let mut disp = ((ctrl & 0b000_11111) as usize) << 8;
+            let len = if ctrl >> 5 == 0b111 {
+                // long match
+                inp.getc()? as usize + 9
+            } else {
+                (ctrl >> 5) as usize + 2
+            };
+            disp |= inp.getc()? as usize;
+            outp.put_backref(disp, len)?;
+        }
+
+        if let Ok(c) = inp.getc() {
+            ctrl = c;
+        } else {
+            return Ok(());
+        }
+    }
+}
+
+fn decompress_lv2(inp: &[u8], outp: &mut impl OutputSink) -> Result<(), DecompressError> {
     todo!()
+}
+
+fn decompress_impl(inp: &[u8], outp: &mut impl OutputSink) -> Result<(), DecompressError> {
+    if inp.len() == 0 {
+        return Ok(());
+    }
+
+    match inp[0] >> 5 {
+        0 => decompress_lv1(inp, outp),
+        1 => decompress_lv2(inp, outp),
+        _ => Err(DecompressError::InvalidCompressionLevel),
+    }
 }
 
 pub fn decompress_to_buf(inp: &[u8], outp: &mut [u8]) -> Result<usize, DecompressError> {
@@ -236,5 +304,55 @@ mod tests {
         outbuf.put_lits(&[1, 2, 3]).unwrap();
         outbuf.put_backref(1, 6).unwrap();
         assert_eq!(outbuf.vec, [1, 2, 3, 2, 3, 2, 3, 2, 3]);
+    }
+
+    #[test]
+    fn test_lv1_manual_lits() {
+        let mut out = [0u8; 5];
+        let len = decompress_to_buf(&[0x01, b'A', b'B', 0x02, b'C', b'D', b'E'], &mut out).unwrap();
+        assert_eq!(len, 5);
+        assert_eq!(out, [b'A', b'B', b'C', b'D', b'E']);
+    }
+
+    #[test]
+    fn test_lv1_manual_short_match() {
+        let mut out = [0u8; 5];
+        let len = decompress_to_buf(&[0x01, b'A', b'B', 0x20, 0x01], &mut out).unwrap();
+        assert_eq!(len, 5);
+        assert_eq!(out, [b'A', b'B', b'A', b'B', b'A']);
+    }
+
+    #[test]
+    fn test_lv1_manual_long_match() {
+        let mut out = [0u8; 11];
+        let len = decompress_to_buf(&[0x01, b'A', b'B', 0xe0, 0x00, 0x01], &mut out).unwrap();
+        assert_eq!(len, 11);
+        assert_eq!(
+            out,
+            [b'A', b'B', b'A', b'B', b'A', b'B', b'A', b'B', b'A', b'B', b'A']
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_lv1_against_ref() {
+        extern crate std;
+
+        let d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let inp_fn = d.join("src/decompress.rs");
+        let ref_fn = d.join("temp.out");
+        std::process::Command::new(d.join("./testtool/testtool"))
+            .arg("c")
+            .arg(inp_fn.to_str().unwrap())
+            .arg(ref_fn.to_str().unwrap())
+            .status()
+            .unwrap();
+
+        let inp = std::fs::read(inp_fn).unwrap();
+        let ref_ = std::fs::read(&ref_fn).unwrap();
+        let _ = std::fs::remove_file(ref_fn);
+
+        let out = decompress_to_vec(&ref_, None).unwrap();
+        assert_eq!(inp, out);
     }
 }
