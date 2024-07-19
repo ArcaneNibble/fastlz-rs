@@ -1,3 +1,4 @@
 /target
 testtool/testtool
 testtool/FastLZ
+.vscode/settings.json
