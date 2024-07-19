@@ -1,5 +1,6 @@
 [package]
 name = "fastlz-rs"
+description = "Pure-Rust reimplementation of FastLZ"
 repository = "https://github.com/ArcaneNibble/fastlz-rs"
 categories = ["no-std::no-alloc", "compression"]
 keywords = ["lz77", "fastlz"]
