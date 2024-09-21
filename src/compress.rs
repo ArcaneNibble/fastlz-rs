@@ -271,13 +271,9 @@ impl CompressState {
     ///
     /// This is a workaround for non-guaranteed copy elision / RVO.
     pub fn new_boxed() -> alloc::boxed::Box<Self> {
-        // *sigh* things that aren't stable, workaround, bleh
-        use core::ptr::addr_of_mut;
+        // *sigh* workaround for lack of Box::new_zeroed
         unsafe {
-            let self_ = alloc::alloc::alloc(core::alloc::Layout::new::<Self>()) as *mut Self;
-            for i in 0..HTAB_SZ {
-                addr_of_mut!((*self_).htab[i]).write(0);
-            }
+            let self_ = alloc::alloc::alloc_zeroed(core::alloc::Layout::new::<Self>()) as *mut Self;
             alloc::boxed::Box::from_raw(self_)
         }
     }
