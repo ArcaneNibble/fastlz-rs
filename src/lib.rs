@@ -32,3 +32,7 @@ pub use decompress::decompress_to_vec;
 pub use decompress::{decompress_to_buf, DecompressError};
 
 mod util;
+
+#[cfg(feature = "std")]
+#[cfg(test)]
+mod wasmtester;

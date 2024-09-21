@@ -743,27 +743,15 @@ mod tests {
 
         let d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let inp_fn = d.join("src/compress.rs");
-        let comp_fn = d.join("temp-lv1-mycomp.lz");
-        let check_fn = d.join("temp-lv1-mycomp.out");
 
         let inp = std::fs::read(inp_fn).unwrap();
         let mut comp_state = CompressState::new();
         let out = comp_state
             .compress_to_vec(&inp, CompressionLevel::Level1)
             .unwrap();
-        std::fs::write(&comp_fn, out).unwrap();
 
-        std::process::Command::new(d.join("./testtool/testtool"))
-            .arg("d")
-            .arg(comp_fn.to_str().unwrap())
-            .arg(check_fn.to_str().unwrap())
-            .status()
-            .unwrap();
-
-        let check = std::fs::read(&check_fn).unwrap();
-
-        let _ = std::fs::remove_file(&comp_fn);
-        let _ = std::fs::remove_file(&check_fn);
+        let mut reference = crate::wasmtester::FastLZWasm::new();
+        let check = reference.fastlz_decompress(&out);
 
         assert_eq!(inp, check);
     }
@@ -775,27 +763,15 @@ mod tests {
 
         let d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let inp_fn = d.join("src/compress.rs");
-        let comp_fn = d.join("temp-lv2-mycomp.lz");
-        let check_fn = d.join("temp-lv2-mycomp.out");
 
         let inp = std::fs::read(inp_fn).unwrap();
         let mut comp_state = CompressState::new();
         let out = comp_state
             .compress_to_vec(&inp, CompressionLevel::Level2)
             .unwrap();
-        std::fs::write(&comp_fn, out).unwrap();
 
-        std::process::Command::new(d.join("./testtool/testtool"))
-            .arg("d")
-            .arg(comp_fn.to_str().unwrap())
-            .arg(check_fn.to_str().unwrap())
-            .status()
-            .unwrap();
-
-        let check = std::fs::read(&check_fn).unwrap();
-
-        let _ = std::fs::remove_file(&comp_fn);
-        let _ = std::fs::remove_file(&check_fn);
+        let mut reference = crate::wasmtester::FastLZWasm::new();
+        let check = reference.fastlz_decompress(&out);
 
         assert_eq!(inp, check);
     }

@@ -365,17 +365,12 @@ mod tests {
 
         let d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let inp_fn = d.join("src/decompress.rs");
-        let ref_fn = d.join("temp-lv1-comp.out");
-        std::process::Command::new(d.join("./testtool/testtool"))
-            .arg("c")
-            .arg(inp_fn.to_str().unwrap())
-            .arg(ref_fn.to_str().unwrap())
-            .status()
-            .unwrap();
 
         let inp = std::fs::read(inp_fn).unwrap();
-        let ref_ = std::fs::read(&ref_fn).unwrap();
-        let _ = std::fs::remove_file(ref_fn);
+
+        let mut reference = crate::wasmtester::FastLZWasm::new();
+        let ref_ = reference.fastlz_compress_level(1, &inp);
+        std::println!("{:02x?}", &ref_[..8]);
 
         let out = decompress_to_vec(&ref_, None).unwrap();
         assert_eq!(inp, out);
@@ -445,17 +440,12 @@ mod tests {
 
         let d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let inp_fn = d.join("src/decompress.rs");
-        let ref_fn = d.join("temp-lv2-comp.out");
-        std::process::Command::new(d.join("./testtool/testtool"))
-            .arg("C")
-            .arg(inp_fn.to_str().unwrap())
-            .arg(ref_fn.to_str().unwrap())
-            .status()
-            .unwrap();
 
         let inp = std::fs::read(inp_fn).unwrap();
-        let ref_ = std::fs::read(&ref_fn).unwrap();
-        let _ = std::fs::remove_file(ref_fn);
+
+        let mut reference = crate::wasmtester::FastLZWasm::new();
+        let ref_ = reference.fastlz_compress_level(2, &inp);
+        std::println!("{:02x?}", &ref_[..8]);
 
         let out = decompress_to_vec(&ref_, None).unwrap();
         assert_eq!(inp, out);
